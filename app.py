@@ -25,7 +25,8 @@ data = data[data['ID'] != 'NaN']
 @st.cache_data(show_spinner="Parsing rubric and building DAGs...")
 def parse_criteria_data(data):
     pattern = r'\{"criterion \d+":'
-    max_criteria = 100
+    max_criteria = max(data['Rubric Only'].fillna('').apply(lambda x: len(re.findall(pattern, x))))
+    # max_criteria = 100
     all_criterion = pd.DataFrame()
 
     for idx, row in data.iterrows():
@@ -107,26 +108,31 @@ st.success("✅ Dependencies parsed!")
 # --- DAG Plotting ---
 st.header("📈 DAG Plots by Task ID")
 
-# Select a task
+# --- Load and filter ---
 task_ids = sorted(all_criterion["ID"].unique())
 selected_id = st.selectbox("Select Task ID", task_ids)
 
-# Filter and clean
 df_task = all_criterion[all_criterion["ID"] == selected_id].copy()
+
+
+# --- Clean criterion_id: remove prefix and colons ---
 def clean_node_id(val):
     return str(val).replace("criterion ", "").replace(":", "").strip()
 
 df_task["node_id"] = df_task["criterion_id"].apply(clean_node_id)
+
+# --- Clean dependent_criteria column ---
 df_task["dependent_criteria"] = df_task["dependent_criteria"].apply(
     lambda x: ast.literal_eval(x) if isinstance(x, str) and x.startswith("[") else x
 )
 
-# --- Build Graph ---
+# --- Build graph ---
 G = nx.DiGraph()
 valid_nodes = set(df_task["node_id"])
 
 for _, row in df_task.iterrows():
-    G.add_node(row["node_id"])
+    node_id = row["node_id"]
+    G.add_node(node_id)
 
 for _, row in df_task.iterrows():
     current = row["node_id"]
@@ -137,17 +143,30 @@ for _, row in df_task.iterrows():
             if dep_id in valid_nodes:
                 G.add_edge(dep_id, current)
 
-# --- Compute depth ---
+print(f"✅ Graph has {len(G.nodes)} nodes and {len(G.edges)} edges")
+if not nx.is_directed_acyclic_graph(G):
+    print("⚠️ Not a DAG! Cycles found:")
+    for cycle in nx.simple_cycles(G):
+        print("  ⮕", " → ".join(cycle))
+else:
+    print("✅ DAG is valid")
+
+# --- Compute depth (longest path to node) ---
 depths = {}
 for node in nx.topological_sort(G):
     preds = list(G.predecessors(node))
-    depths[node] = max([depths[p] for p in preds], default=0)
+    if not preds:
+        depths[node] = 0
+    else:
+        depths[node] = max([depths[pred] for pred in preds]) + 1
 
-# --- Layout by depth ---
+# --- Group nodes by depth ---
 layers = defaultdict(list)
 for node, depth in depths.items():
     layers[depth].append(node)
 
+# --- Build manual layout: x = depth, y = spacing ---
+# --- Improved layout: x = depth, y = centered and spaced ---
 pos = {}
 layer_y_spacing = 1.5
 for depth_level, nodes in layers.items():
@@ -158,18 +177,33 @@ for depth_level, nodes in layers.items():
         y = total_height / 2 - i * layer_y_spacing
         pos[node] = (x, y)
 
-# --- Draw graph ---
+# --- Plot ---
 fig, ax = plt.subplots(figsize=(14, 7))
 
+# --- Color nodes: standalone = light pink, others = dodgerblue ---
 standalone_nodes = [n for n in G.nodes if G.in_degree(n) == 0 and G.out_degree(n) == 0]
 connected_nodes = [n for n in G.nodes if n not in standalone_nodes]
 
-nx.draw_networkx_nodes(G, pos, ax=ax, nodelist=standalone_nodes, node_size=1500, node_color="lightpink")
-nx.draw_networkx_nodes(G, pos, ax=ax, nodelist=connected_nodes, node_size=1500, node_color="dodgerblue")
+# Draw standalone nodes (pink)
+nx.draw_networkx_nodes(
+    G, pos, ax=ax,
+    nodelist=standalone_nodes,
+    node_size=1500,
+    node_color="lightpink"
+)
+
+# Draw connected nodes (blue)
+nx.draw_networkx_nodes(
+    G, pos, ax=ax,
+    nodelist=connected_nodes,
+    node_size=1500,
+    node_color="dodgerblue"
+)
 nx.draw_networkx_edges(G, pos, ax=ax, arrows=True, arrowsize=50, edge_color="gray", connectionstyle='arc3,rad=0.05')
 nx.draw_networkx_labels(G, pos, ax=ax, font_size=10, font_weight="bold", font_color="white")
 
 plt.title(f"DAG for Task ID {selected_id}", fontsize=16)
 plt.axis("off")
 plt.tight_layout()
+
 st.pyplot(fig)
