@@ -10,6 +10,84 @@ import matplotlib.pyplot as plt
 import re, json
 from collections import defaultdict
 
+@st.cache_data(show_spinner=True)
+def parse_criteria_data(data):
+    pattern = r'\{"criterion \d+":'
+    max_criteria = 100
+    all_criterion = pd.DataFrame()
+
+    for idx, row in data.iterrows():
+        rubric = row.get('Rubric Only')
+        try:
+            rubric_json = json.loads(rubric)
+            flattened = []
+            for item in rubric_json:
+                for criterion_id, details in item.items():
+                    entry = {'criterion_id': criterion_id}
+                    entry.update(details)
+                    flattened.append(entry)
+            rubric_df = pd.DataFrame(flattened)
+            criterion_ids = rubric_df['criterion_id'].tolist()
+            id_numbers = [cid.split()[-1] for cid in criterion_ids]
+            id_to_index = {id_num: i for i, id_num in enumerate(id_numbers)}
+            n = len(id_numbers)
+            grid = [['0'] * n for _ in range(n)]
+            for i, deps in enumerate(rubric_df['dependent_criteria']):
+                for dep in deps:
+                    dep_str = str(dep)
+                    if dep_str in id_to_index:
+                        j = id_to_index[dep_str]
+                        grid[i][j] = '1'
+            dependency_grid = pd.DataFrame(grid, columns=id_numbers, index=id_numbers)
+            dependency_grid_clean = dependency_grid.astype(int)
+            dependency_grid_clean.index = dependency_grid_clean.index.astype(str)
+            dependency_grid_clean.columns = dependency_grid_clean.columns.astype(str)
+
+            def get_depth(criterion, visited=None):
+                if visited is None:
+                    visited = set()
+                if criterion in visited:
+                    return 0
+                visited.add(criterion)
+                deps = dependency_grid_clean.loc[criterion]
+                direct = [col for col in dependency_grid_clean.columns if deps[col] == 1]
+                return 0 if not direct else 1 + max([get_depth(d, visited.copy()) for d in direct])
+
+            depths = {crit: get_depth(crit) for crit in dependency_grid_clean.index}
+
+            current_cols = dependency_grid.shape[1]
+            if current_cols < max_criteria:
+                existing_cols = list(dependency_grid.columns)
+                all_cols = existing_cols + [str(i) for i in range(current_cols + 1, max_criteria + 1)]
+                for col in all_cols:
+                    if col not in dependency_grid.columns:
+                        dependency_grid[col] = pd.NA
+
+            dependency_grid_c = dependency_grid.apply(pd.to_numeric, errors='coerce')
+            dependency_grid['criterion_sum'] = dependency_grid_c.sum(axis=1, skipna=True, min_count=1)
+            renamed_columns = {
+                col: f"criterion_{col}" for col in dependency_grid.columns if col != 'criterion_sum'
+            }
+            dependency_grid = dependency_grid.rename(columns=renamed_columns)
+            cols = ['criterion_sum'] + [col for col in dependency_grid.columns if col != 'criterion_sum']
+            dependency_grid = dependency_grid[cols]
+
+            rubric_df = rubric_df.reset_index(drop=True)
+            dependency_grid = dependency_grid.reset_index(drop=True)
+            dependency_grid.insert(1, 'criterion_dependency_depth', list(depths.values()))
+            rubric_df = pd.concat([rubric_df, dependency_grid], axis=1)
+            rubric_df.insert(0, 'original_rubric', row['Rubric Only'])
+            rubric_df.insert(0, 'ID', row['ID'])
+
+            all_criterion = pd.concat([all_criterion, rubric_df], axis=0)
+
+        except Exception:
+            continue
+
+    return all_criterion
+
+
+
 st.set_page_config(layout="wide")
 st.title("🧠 DAG Viewer from 'Rubric Only' JSON")
 
@@ -21,7 +99,7 @@ if not uploaded_file:
 data = pd.read_csv(uploaded_file)
 data = data.dropna(subset=['ID'])
 data = data[data['ID'] != 'NaN']  
-
+all_criterion = parse_criteria_data(data)
 
 # ------ Read in file ----------- #
 
